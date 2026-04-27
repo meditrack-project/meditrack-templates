@@ -44,11 +44,10 @@ jobs:
     permissions:
       contents: write
     outputs:
-      version:   ${{ steps.meta.outputs.version }}
+      version: ${{ steps.meta.outputs.version }}
       image_tag: ${{ steps.meta.outputs.image_tag }}
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -63,15 +62,17 @@ jobs:
           default_bump: patch
           initial_version: "2.0.0"
           custom_release_rules: "feat:minor:Features,feat!:major:Breaking Changes,breaking:major:Breaking Changes"
-          dry_run: ${{ github.ref_name != 'main' }}
+          dry_run: ${{ inputs.branch != 'main' }}
 
       - name: Extract Image Tags
         id: meta
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
-          VERSION="${{ steps.version.outputs.new_version }}"
+          RAW_VERSION="${{ steps.version.outputs.new_version }}"
           IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}"
           BRANCH="${{ inputs.branch }}"
+
+          VERSION=$(echo "$RAW_VERSION" | sed 's/-.*$//')
 
           if [ "$BRANCH" = "main" ]; then
             VERSIONED_TAG="${IMAGE}:v${VERSION}"
@@ -85,24 +86,16 @@ jobs:
             OUTPUT_TAG="v${VERSION}-dev"
           fi
 
-          echo "image=${IMAGE}"                 >> $GITHUB_OUTPUT
-          echo "tag_version=${VERSIONED_TAG}"   >> $GITHUB_OUTPUT
-          echo "tag_sha=${SHA_TAG}"             >> $GITHUB_OUTPUT
-          echo "tag_latest=${LATEST_TAG}"       >> $GITHUB_OUTPUT
-          echo "version=v${VERSION}"            >> $GITHUB_OUTPUT
-          echo "image_tag=${OUTPUT_TAG}"        >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "tag_version=${VERSIONED_TAG}" >> $GITHUB_OUTPUT
+          echo "tag_sha=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "tag_latest=${LATEST_TAG}" >> $GITHUB_OUTPUT
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_tag=${OUTPUT_TAG}" >> $GITHUB_OUTPUT
 
-          echo "════════════════════════════════════════"
-          echo "  Service    : ${{ inputs.service_name }}"
-          echo "  Image      : ${IMAGE}"
-          echo "  Version    : v${VERSION}"
-          echo "  Branch     : ${BRANCH}"
-          echo "  Tags:"
-          echo "    ${VERSIONED_TAG}"
-          echo "    ${SHA_TAG}"
-          echo "    ${LATEST_TAG}"
-          echo "  Output tag : ${OUTPUT_TAG}"
-          echo "════════════════════════════════════════"
+          echo "Raw version   : ${RAW_VERSION}"
+          echo "Clean version : ${VERSION}"
+          echo "Final tag     : ${OUTPUT_TAG}"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -113,7 +106,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: "3. Build Docker Image (Python)"
+      - name: Build Docker Image (Python)
         if: inputs.language == 'python'
         run: |
           for i in 1 2 3; do
@@ -125,6 +118,7 @@ jobs:
               -f ${{ inputs.service_path }}/Dockerfile \
               ${{ inputs.service_path }} \
             && echo "Build succeeded" && break
+
             if [ $i -lt 3 ]; then
               echo "Build failed — waiting 30s before retry..."
               sleep 30
@@ -134,7 +128,7 @@ jobs:
             fi
           done
 
-      - name: "3. Build Docker Image (JavaScript)"
+      - name: Build Docker Image (JavaScript)
         if: inputs.language == 'javascript'
         run: |
           for i in 1 2 3; do
@@ -150,6 +144,7 @@ jobs:
               -f ${{ inputs.service_path }}/Dockerfile \
               ${{ inputs.service_path }} \
             && echo "Build succeeded" && break
+
             if [ $i -lt 3 ]; then
               echo "Build failed — waiting 30s before retry..."
               sleep 30
@@ -159,7 +154,7 @@ jobs:
             fi
           done
 
-      - name: "4. Trivy — Container Scan (CRITICAL blocks)"
+      - name: Trivy Container Scan
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.meta.outputs.tag_version }}
@@ -169,7 +164,7 @@ jobs:
           ignore-unfixed: true
           vuln-type: "os,library"
 
-      - name: Trivy Full Report (HIGH + CRITICAL)
+      - name: Trivy Full Report
         if: success()
         uses: aquasecurity/trivy-action@master
         with:
@@ -190,31 +185,26 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      - name: "5. Push Docker Image to Docker Hub"
+      - name: Push Docker Image to Docker Hub
         if: github.event_name != 'pull_request'
         run: |
           docker push ${{ steps.meta.outputs.tag_version }}
           docker push ${{ steps.meta.outputs.tag_sha }}
           docker push ${{ steps.meta.outputs.tag_latest }}
-          echo "════════════════════════════════════════"
-          echo "  Pushed: ${{ steps.meta.outputs.tag_version }}"
-          echo "  Pushed: ${{ steps.meta.outputs.tag_sha }}"
-          echo "  Pushed: ${{ steps.meta.outputs.tag_latest }}"
-          echo "════════════════════════════════════════"
 
       - name: Write Job Summary
         if: success()
         run: |
-          echo "## ✅ Docker Build Complete"                            >> $GITHUB_STEP_SUMMARY
-          echo "| Field | Value |"                                      >> $GITHUB_STEP_SUMMARY
-          echo "|-------|-------|"                                      >> $GITHUB_STEP_SUMMARY
-          echo "| Service | ${{ inputs.service_name }} |"              >> $GITHUB_STEP_SUMMARY
-          echo "| Version | ${{ steps.meta.outputs.version }} |"       >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ inputs.branch }} |"                     >> $GITHUB_STEP_SUMMARY
-          echo "| Image Tag | ${{ steps.meta.outputs.image_tag }} |"   >> $GITHUB_STEP_SUMMARY
-          echo "| SHA Tag | ${{ steps.meta.outputs.tag_sha }} |"       >> $GITHUB_STEP_SUMMARY
+          echo "## Docker Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ inputs.service_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ steps.meta.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ inputs.branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | ${{ steps.meta.outputs.image_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA Tag | ${{ steps.meta.outputs.tag_sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Latest Tag | ${{ steps.meta.outputs.tag_latest }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trivy | ✅ No CRITICAL vulns |"                      >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy | Passed |" >> $GITHUB_STEP_SUMMARY
 
       - name: Send Email on Failure
         if: failure()
