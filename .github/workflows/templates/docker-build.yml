@@ -1,0 +1,232 @@
+# ─────────────────────────────────────────────────────────────
+# Template — Docker Build, Trivy Scan & Push
+# Semver via mathieudutour/github-tag-action (per-service prefix)
+# Trivy: CRITICAL blocks push, HIGH reported only
+# Pushes to Docker Hub: neerajbala/<image>
+# Tags: v1.2.3  +  v1.2.3-<sha>  +  latest / dev-latest
+# ─────────────────────────────────────────────────────────────
+name: "Template — Docker Build, Trivy & Push"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Human-readable service name (e.g. meditrack-user-service)"
+        required: true
+        type: string
+      service_path:
+        description: "Path to service directory relative to repo root"
+        required: true
+        type: string
+      docker_image_name:
+        description: "Docker Hub image name (e.g. meditrack-user-service)"
+        required: true
+        type: string
+      language:
+        description: "Runtime language: python or javascript"
+        required: true
+        type: string
+      branch:
+        description: "Branch name that triggered the build (dev or main)"
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+    outputs:
+      version:
+        description: "Semantic version tag e.g. v1.2.3"
+        value: ${{ jobs.docker.outputs.version }}
+      image_tag:
+        description: "Full image tag pushed e.g. v1.2.3-dev or v1.2.3"
+        value: ${{ jobs.docker.outputs.image_tag }}
+
+jobs:
+  docker:
+    name: "3,4,5. Docker — ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # contents: write needed for git tag push
+    outputs:
+      version:   ${{ steps.meta.outputs.version }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Semantic Version via git tags ─────────────────────
+      # Tag format per service: meditrack-user-service/v1.2.3
+      # Keeps each service's version history independent
+      - name: Determine Semantic Version
+        id: version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          tag_prefix: "${{ inputs.service_name }}/v"
+          default_bump: patch
+          initial_version: "1.0.0"
+          custom_release_rules: "feat:minor:Features,feat!:major:Breaking Changes,breaking:major:Breaking Changes"
+          dry_run: ${{ github.event_name == 'pull_request' }}
+          # dry_run on PRs: calculates version but does NOT create git tag
+
+      # ── Build metadata ────────────────────────────────────
+      - name: Extract Image Tags
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          VERSION="${{ steps.version.outputs.new_version }}"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}"
+          BRANCH="${{ inputs.branch }}"
+
+          # dev branch → append -dev suffix
+          # main branch → clean semver tag
+          if [ "$BRANCH" = "main" ]; then
+            VERSIONED_TAG="${IMAGE}:v${VERSION}"
+            SHA_TAG="${IMAGE}:v${VERSION}-${SHORT_SHA}"
+            LATEST_TAG="${IMAGE}:latest"
+            OUTPUT_TAG="v${VERSION}"
+          else
+            VERSIONED_TAG="${IMAGE}:v${VERSION}-dev"
+            SHA_TAG="${IMAGE}:v${VERSION}-${SHORT_SHA}-dev"
+            LATEST_TAG="${IMAGE}:dev-latest"
+            OUTPUT_TAG="v${VERSION}-dev"
+          fi
+
+          echo "image=${IMAGE}"                 >> $GITHUB_OUTPUT
+          echo "tag_version=${VERSIONED_TAG}"   >> $GITHUB_OUTPUT
+          echo "tag_sha=${SHA_TAG}"             >> $GITHUB_OUTPUT
+          echo "tag_latest=${LATEST_TAG}"       >> $GITHUB_OUTPUT
+          echo "version=v${VERSION}"            >> $GITHUB_OUTPUT
+          echo "image_tag=${OUTPUT_TAG}"        >> $GITHUB_OUTPUT
+
+          echo "════════════════════════════════════════"
+          echo "  Service : ${{ inputs.service_name }}"
+          echo "  Image   : ${IMAGE}"
+          echo "  Version : v${VERSION}"
+          echo "  Branch  : ${BRANCH}"
+          echo "  Tags    : ${VERSIONED_TAG}"
+          echo "            ${SHA_TAG}"
+          echo "            ${LATEST_TAG}"
+          echo "════════════════════════════════════════"
+
+      # ── Docker Hub login ──────────────────────────────────
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build image (Python services) ─────────────────────
+      - name: "3. Build Docker Image (Python)"
+        if: inputs.language == 'python'
+        run: |
+          docker build \
+            -t ${{ steps.meta.outputs.tag_version }} \
+            -t ${{ steps.meta.outputs.tag_sha }} \
+            -t ${{ steps.meta.outputs.tag_latest }} \
+            -f ${{ inputs.service_path }}/Dockerfile \
+            ${{ inputs.service_path }}
+
+      # ── Build image (React/Vite → nginx) ──────────────────
+      # Passes VITE_ build args so the built JS bundle
+      # has the correct API URLs baked in at build time
+      - name: "3. Build Docker Image (JavaScript)"
+        if: inputs.language == 'javascript'
+        run: |
+          docker build \
+            -t ${{ steps.meta.outputs.tag_version }} \
+            -t ${{ steps.meta.outputs.tag_sha }} \
+            -t ${{ steps.meta.outputs.tag_latest }} \
+            --build-arg VITE_USER_SERVICE_URL=https://meditrack.prod.local/api/users \
+            --build-arg VITE_MEDICAL_SERVICE_URL=https://meditrack.prod.local/api/medical \
+            --build-arg VITE_HEALTH_SERVICE_URL=https://meditrack.prod.local/api/health \
+            --build-arg VITE_AI_SERVICE_URL=https://meditrack.prod.local/api/ai \
+            -f ${{ inputs.service_path }}/Dockerfile \
+            ${{ inputs.service_path }}
+
+      # ── Trivy scan ────────────────────────────────────────
+      # exit-code 1 on CRITICAL → blocks push
+      # HIGH is reported in table but does NOT block
+      - name: "4. Trivy — Container Scan"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tag_version }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL
+          ignore-unfixed: true
+          vuln-type: "os,library"
+        # To also block on HIGH change severity to: CRITICAL,HIGH
+
+      # ── Trivy full report (artifact, never blocks) ─────────
+      - name: Trivy Full Report (HIGH + CRITICAL)
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tag_version }}
+          format: table
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          output: trivy-report.txt
+
+      - name: Upload Trivy Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ inputs.service_name }}
+          path: trivy-report.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # ── Push to Docker Hub (skipped on PRs) ───────────────
+      - name: "5. Push Docker Image to Docker Hub"
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Pushing images to Docker Hub..."
+          docker push ${{ steps.meta.outputs.tag_version }}
+          docker push ${{ steps.meta.outputs.tag_sha }}
+          docker push ${{ steps.meta.outputs.tag_latest }}
+          echo "════════════════════════════════════════"
+          echo "  Pushed: ${{ steps.meta.outputs.tag_version }}"
+          echo "  Pushed: ${{ steps.meta.outputs.tag_sha }}"
+          echo "  Pushed: ${{ steps.meta.outputs.tag_latest }}"
+          echo "════════════════════════════════════════"
+
+      # ── Email on failure ───────────────────────────────────
+      - name: Send Email on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "MediTrack CI Failed — Docker (${{ inputs.service_name }})"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: MediTrack CI Pipeline
+          body: |
+            Docker build/Trivy/push FAILED for: ${{ inputs.service_name }}
+
+            Image  : ${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}
+            Branch : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            Author : ${{ github.actor }}
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
