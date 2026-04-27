@@ -1,0 +1,151 @@
+# ─────────────────────────────────────────────────────────────
+# Reusable Workflow: Snyk SCA Scan
+# Called by: each service repo's ci-cd.yml
+# Supports: Python (pip) + JavaScript (npm)
+# Blocks pipeline on HIGH or CRITICAL severity
+# ─────────────────────────────────────────────────────────────
+name: Snyk SCA
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: "Service name e.g. meditrack-user-service"
+        required: true
+        type: string
+      language:
+        description: "python or javascript"
+        required: true
+        type: string
+      working-directory:
+        description: "Directory containing requirements.txt or package.json"
+        required: false
+        type: string
+        default: "."
+    secrets:
+      SNYK_TOKEN:
+        required: true
+
+jobs:
+  snyk-scan:
+    name: Snyk Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Python dependency install ──────────────────────────
+      - name: Set up Python
+        if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        if: inputs.language == 'python'
+        working-directory: ${{ inputs.working-directory }}
+        run: pip install --no-cache-dir -r requirements.txt
+
+      # ── JavaScript dependency install ──────────────────────
+      - name: Set up Node.js
+        if: inputs.language == 'javascript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install JS dependencies
+        if: inputs.language == 'javascript'
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      # ── Snyk Setup ────────────────────────────────────────
+      - name: Set up Snyk
+        uses: snyk/actions/setup@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      # ── Snyk Test (Python) ────────────────────────────────
+      - name: Snyk test Python dependencies
+        if: inputs.language == 'python'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          snyk test \
+            --file=requirements.txt \
+            --package-manager=pip \
+            --severity-threshold=high \
+            --json-file-output=snyk-results.json \
+            || SNYK_EXIT=$?
+
+          # Show results
+          if [ -f snyk-results.json ]; then
+            echo "=== Snyk Results ==="
+            cat snyk-results.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          vulns = data.get('vulnerabilities', [])
+          high = [v for v in vulns if v['severity'] in ['high','critical']]
+          print(f'Total vulnerabilities: {len(vulns)}')
+          print(f'High/Critical: {len(high)}')
+          for v in high:
+              print(f'  [{v[\"severity\"].upper()}] {v[\"packageName\"]} - {v[\"title\"]}')
+            "
+          fi
+
+          exit ${SNYK_EXIT:-0}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      # ── Snyk Test (JavaScript) ────────────────────────────
+      - name: Snyk test JS dependencies
+        if: inputs.language == 'javascript'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          snyk test \
+            --file=package.json \
+            --severity-threshold=high \
+            --json-file-output=snyk-results.json \
+            || SNYK_EXIT=$?
+
+          if [ -f snyk-results.json ]; then
+            echo "=== Snyk Results ==="
+            cat snyk-results.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          vulns = data.get('vulnerabilities', [])
+          high = [v for v in vulns if v['severity'] in ['high','critical']]
+          print(f'Total vulnerabilities: {len(vulns)}')
+          print(f'High/Critical: {len(high)}')
+          for v in high:
+              print(f'  [{v[\"severity\"].upper()}] {v[\"packageName\"]} - {v[\"title\"]}')
+            "
+          fi
+
+          exit ${SNYK_EXIT:-0}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      # ── Snyk Monitor (track over time in Snyk dashboard) ──
+      - name: Snyk monitor
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          snyk monitor \
+            --project-name=${{ inputs.service-name }} \
+            --org=meditrack
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+        # Monitor never blocks - just tracks
+
+      # ── Upload results as artifact ────────────────────────
+      - name: Upload Snyk results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-results-${{ inputs.service-name }}
+          path: ${{ inputs.working-directory }}/snyk-results.json
+          retention-days: 30
