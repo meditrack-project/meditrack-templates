@@ -67,7 +67,7 @@ jobs:
         id: paths
         run: |
           ENV="${{ inputs.environment }}"
-          VALUES_FILE="helm/meditrack/values-${ENV}.yaml"
+          VALUES_FILE="values-${ENV}.yaml"
           echo "values_file=${VALUES_FILE}" >> $GITHUB_OUTPUT
           echo "Target values file: ${VALUES_FILE}"
 
