@@ -53,8 +53,7 @@ jobs:
   docker:
     name: "3,4,5. Docker — ${{ inputs.service_name }}"
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    
       # contents: write needed for git tag push
     outputs:
       version:   ${{ steps.meta.outputs.version }}
