@@ -1,51 +1,40 @@
-# ─────────────────────────────────────────────────────────────
-# Template — Docker Build, Trivy Scan & Push
-# Semantic versioning via mathieudutour/github-tag-action
-#
-# Versioning strategy:
-#   main branch → real git tag created → clean version e.g. v2.0.1
-#   dev branch  → dry_run, no git tag  → clean version e.g. v2.0.1-dev
-#   PR          → dry_run, no git tag  → clean version (no push)
-#
-# Tags pushed to Docker Hub:
-#   main: v2.0.1  +  v2.0.1-<sha>  +  latest
-#   dev:  v2.0.1-dev  +  v2.0.1-<sha>-dev  +  dev-latest
-#
-# Trivy:
-#   CRITICAL → blocks push
-#   HIGH     → reported in artifact, does not block
-# ─────────────────────────────────────────────────────────────
 name: "Template — Docker Build, Trivy & Push"
 
 on:
   workflow_call:
     inputs:
       service_name:
-        description: "Human-readable service name (e.g. meditrack-user-service)"
         required: true
         type: string
       service_path:
-        description: "Path to service directory relative to repo root (use . for root)"
         required: true
         type: string
       docker_image_name:
-        description: "Docker Hub image name (e.g. meditrack-user-service)"
         required: true
         type: string
       language:
-        description: "Runtime language: python or javascript"
         required: true
         type: string
       branch:
-        description: "Branch name that triggered the build (dev or main)"
         required: true
         type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
     outputs:
       version:
         description: "Clean semantic version e.g. v2.0.1"
         value: ${{ jobs.docker.outputs.version }}
       image_tag:
-        description: "Full image tag pushed e.g. v2.0.1-dev or v2.0.1"
+        description: "Full image tag e.g. v2.0.1-dev or v2.0.1"
         value: ${{ jobs.docker.outputs.image_tag }}
 
 jobs:
@@ -54,35 +43,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # contents: write is required to push git tags on main branch
     outputs:
       version:   ${{ steps.meta.outputs.version }}
       image_tag: ${{ steps.meta.outputs.image_tag }}
 
     steps:
 
-      # ── Checkout ──────────────────────────────────────────
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # fetch-depth 0 required so git tag history is available
-          # mathieudutour action needs full tag history to find
-          # the latest version tag
 
-      # ── Semantic Version ───────────────────────────────────
-      # Tag format in git: meditrack-user-service/v2.0.1
-      # Each service has its own independent version history
-      # because the prefix includes the service name
-      #
-      # dry_run logic:
-      #   main branch → dry_run false → real git tag is created
-      #   dev branch  → dry_run true  → no git tag, just calculates
-      #   PR          → dry_run true  → no git tag, just calculates
-      #
-      # This means new_version output is ALWAYS a clean number
-      # e.g. "2.0.1" never "2.0.1-dev.0"
-      # We add the -dev suffix ourselves in the meta step below
       - name: Determine Semantic Version
         id: version
         uses: mathieudutour/github-tag-action@v6.2
@@ -93,17 +64,7 @@ jobs:
           initial_version: "2.0.0"
           custom_release_rules: "feat:minor:Features,feat!:major:Breaking Changes,breaking:major:Breaking Changes"
           dry_run: ${{ github.ref_name != 'main' }}
-          # Commit message → version bump:
-          #   fix: anything          → PATCH  (2.0.0 → 2.0.1)
-          #   chore: anything        → PATCH  (2.0.0 → 2.0.1)
-          #   feat: anything         → MINOR  (2.0.0 → 2.1.0)
-          #   feat!: anything        → MAJOR  (2.0.0 → 3.0.0)
-          #   breaking: anything     → MAJOR  (2.0.0 → 3.0.0)
 
-      # ── Build Metadata ─────────────────────────────────────
-      # Calculates all image tag strings needed for build and push
-      # new_version from the action above is always clean e.g. "2.0.1"
-      # We add -dev suffix for dev branch builds here
       - name: Extract Image Tags
         id: meta
         run: |
@@ -112,26 +73,18 @@ jobs:
           IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}"
           BRANCH="${{ inputs.branch }}"
 
-          echo "Branch   : ${BRANCH}"
-          echo "Version  : ${VERSION}"
-          echo "Image    : ${IMAGE}"
-          echo "Short SHA: ${SHORT_SHA}"
-
           if [ "$BRANCH" = "main" ]; then
-            # Production tags — clean semver, no suffix
             VERSIONED_TAG="${IMAGE}:v${VERSION}"
             SHA_TAG="${IMAGE}:v${VERSION}-${SHORT_SHA}"
             LATEST_TAG="${IMAGE}:latest"
             OUTPUT_TAG="v${VERSION}"
           else
-            # Dev tags — append -dev suffix to all tags
             VERSIONED_TAG="${IMAGE}:v${VERSION}-dev"
             SHA_TAG="${IMAGE}:v${VERSION}-${SHORT_SHA}-dev"
             LATEST_TAG="${IMAGE}:dev-latest"
             OUTPUT_TAG="v${VERSION}-dev"
           fi
 
-          # Write all outputs
           echo "image=${IMAGE}"                 >> $GITHUB_OUTPUT
           echo "tag_version=${VERSIONED_TAG}"   >> $GITHUB_OUTPUT
           echo "tag_sha=${SHA_TAG}"             >> $GITHUB_OUTPUT
@@ -151,7 +104,6 @@ jobs:
           echo "  Output tag : ${OUTPUT_TAG}"
           echo "════════════════════════════════════════"
 
-      # ── Docker Hub Login ───────────────────────────────────
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -161,13 +113,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── Build Image — Python ───────────────────────────────
-      # Retry loop handles transient Docker Hub 504 timeouts
-      # when pulling base image python:3.12-slim
       - name: "3. Build Docker Image (Python)"
         if: inputs.language == 'python'
         run: |
-          echo "Building Python image..."
           for i in 1 2 3; do
             echo "Attempt ${i}/3"
             docker build \
@@ -177,7 +125,6 @@ jobs:
               -f ${{ inputs.service_path }}/Dockerfile \
               ${{ inputs.service_path }} \
             && echo "Build succeeded" && break
-
             if [ $i -lt 3 ]; then
               echo "Build failed — waiting 30s before retry..."
               sleep 30
@@ -187,14 +134,9 @@ jobs:
             fi
           done
 
-      # ── Build Image — JavaScript (React/Vite → nginx) ─────
-      # Passes VITE_ build args so the compiled JS bundle
-      # has the correct API URLs baked in at build time
-      # Retry loop for same transient Docker Hub reasons
       - name: "3. Build Docker Image (JavaScript)"
         if: inputs.language == 'javascript'
         run: |
-          echo "Building JavaScript image..."
           for i in 1 2 3; do
             echo "Attempt ${i}/3"
             docker build \
@@ -208,7 +150,6 @@ jobs:
               -f ${{ inputs.service_path }}/Dockerfile \
               ${{ inputs.service_path }} \
             && echo "Build succeeded" && break
-
             if [ $i -lt 3 ]; then
               echo "Build failed — waiting 30s before retry..."
               sleep 30
@@ -218,11 +159,6 @@ jobs:
             fi
           done
 
-      # ── Trivy Blocking Scan ────────────────────────────────
-      # Scans the locally built image (not pulled from registry)
-      # exit-code 1 on CRITICAL → pipeline stops, image not pushed
-      # HIGH vulns are visible in table but do NOT block
-      # ignore-unfixed: true → skip vulns with no fix available
       - name: "4. Trivy — Container Scan (CRITICAL blocks)"
         uses: aquasecurity/trivy-action@master
         with:
@@ -233,10 +169,6 @@ jobs:
           ignore-unfixed: true
           vuln-type: "os,library"
 
-      # ── Trivy Full Report ──────────────────────────────────
-      # Runs only if blocking scan passed (success())
-      # Shows HIGH + CRITICAL in full detail
-      # Uploaded as artifact for review — never blocks pipeline
       - name: Trivy Full Report (HIGH + CRITICAL)
         if: success()
         uses: aquasecurity/trivy-action@master
@@ -258,42 +190,32 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      # ── Push to Docker Hub ─────────────────────────────────
-      # Skipped on pull_request events
-      # Only runs after Trivy scan passes
       - name: "5. Push Docker Image to Docker Hub"
         if: github.event_name != 'pull_request'
         run: |
-          echo "Pushing images to Docker Hub..."
-
           docker push ${{ steps.meta.outputs.tag_version }}
           docker push ${{ steps.meta.outputs.tag_sha }}
           docker push ${{ steps.meta.outputs.tag_latest }}
-
           echo "════════════════════════════════════════"
           echo "  Pushed: ${{ steps.meta.outputs.tag_version }}"
           echo "  Pushed: ${{ steps.meta.outputs.tag_sha }}"
           echo "  Pushed: ${{ steps.meta.outputs.tag_latest }}"
           echo "════════════════════════════════════════"
 
-      # ── Pipeline Summary ───────────────────────────────────
       - name: Write Job Summary
         if: success()
         run: |
-          echo "## ✅ Docker Build Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Service | ${{ inputs.service_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | ${{ steps.meta.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ inputs.branch }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Image Tag | ${{ steps.meta.outputs.image_tag }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Versioned | ${{ steps.meta.outputs.tag_version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| SHA Tag | ${{ steps.meta.outputs.tag_sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Docker Build Complete"                            >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |"                                      >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|"                                      >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ inputs.service_name }} |"              >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ steps.meta.outputs.version }} |"       >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ inputs.branch }} |"                     >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | ${{ steps.meta.outputs.image_tag }} |"   >> $GITHUB_STEP_SUMMARY
+          echo "| SHA Tag | ${{ steps.meta.outputs.tag_sha }} |"       >> $GITHUB_STEP_SUMMARY
           echo "| Latest Tag | ${{ steps.meta.outputs.tag_latest }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trivy | ✅ No CRITICAL vulns |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy | ✅ No CRITICAL vulns |"                      >> $GITHUB_STEP_SUMMARY
 
-      # ── Email on Failure ───────────────────────────────────
       - name: Send Email on Failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
@@ -314,4 +236,3 @@ jobs:
             Author : ${{ github.actor }}
 
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            
