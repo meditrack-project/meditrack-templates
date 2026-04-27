@@ -76,7 +76,7 @@ jobs:
           github_token: ${{ github.token }}
           tag_prefix: "${{ inputs.service_name }}/v"
           default_bump: patch
-          initial_version: "1.0.0"
+          initial_version: "2.0.0"
           custom_release_rules: "feat:minor:Features,feat!:major:Breaking Changes,breaking:major:Breaking Changes"
           dry_run: ${{ github.event_name == 'pull_request' }}
           # dry_run on PRs: calculates version but does NOT create git tag
