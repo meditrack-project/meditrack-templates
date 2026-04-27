@@ -1,0 +1,179 @@
+# ─────────────────────────────────────────────────────────────
+# Template — CD ArgoCD Manifest Update
+# Checks out meditrack-gitops repo
+# Uses yq to patch global.<helm_service_key>.imageTag
+# in values-dev.yaml (dev) or values-prod.yaml (prod)
+# Retry loop on git push (handles concurrent pushes)
+# Sends success + failure emails
+# ─────────────────────────────────────────────────────────────
+name: "Template — CD GitOps Update"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Human-readable service name (e.g. meditrack-user-service)"
+        required: true
+        type: string
+      helm_service_key:
+        description: "Key in values.yaml (e.g. userService, aiService, frontend)"
+        required: true
+        type: string
+      image_tag:
+        description: "New Docker image tag (e.g. v1.2.3-dev or v1.2.3)"
+        required: true
+        type: string
+      environment:
+        description: "Target environment: dev or prod"
+        required: true
+        type: string
+      version:
+        description: "Semantic version for commit message (e.g. v1.2.3)"
+        required: true
+        type: string
+    secrets:
+      GITOPS_TOKEN:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+
+jobs:
+  update-manifest:
+    name: "6. CD ${{ inputs.environment }} — ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout meditrack-gitops
+        uses: actions/checkout@v4
+        with:
+          repository: meditrack-project/meditrack-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+          ref: main
+
+      # ── Install yq ────────────────────────────────────────
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      # ── Select correct values file ────────────────────────
+      - name: Set values file path
+        id: paths
+        run: |
+          ENV="${{ inputs.environment }}"
+          VALUES_FILE="helm/meditrack/values-${ENV}.yaml"
+          echo "values_file=${VALUES_FILE}" >> $GITHUB_OUTPUT
+          echo "Target values file: ${VALUES_FILE}"
+
+      # ── Show current tag before update ────────────────────
+      - name: Show current image tag
+        run: |
+          KEY="${{ inputs.helm_service_key }}"
+          FILE="${{ steps.paths.outputs.values_file }}"
+          echo "Current global.${KEY}.imageTag:"
+          yq ".global.${KEY}.imageTag // \"not set\"" "${FILE}"
+
+      # ── Patch imageTag with yq ────────────────────────────
+      - name: Update image tag
+        run: |
+          KEY="${{ inputs.helm_service_key }}"
+          FILE="${{ steps.paths.outputs.values_file }}"
+          NEW_TAG="${{ inputs.image_tag }}"
+
+          yq -i ".global.${KEY}.imageTag = \"${NEW_TAG}\"" "${FILE}"
+
+          echo "Updated global.${KEY}.imageTag:"
+          RESULT=$(yq ".global.${KEY}.imageTag" "${FILE}")
+          echo "${RESULT}"
+
+          if [ "${RESULT}" != "${NEW_TAG}" ]; then
+            echo "ERROR: yq update failed — expected ${NEW_TAG}, got ${RESULT}"
+            exit 1
+          fi
+
+      # ── Commit and push (with retry on concurrent pushes) ─
+      - name: Commit and push
+        run: |
+          git config user.name  "meditrack-cicd[bot]"
+          git config user.email "cicd@meditrack.local"
+
+          FILE="${{ steps.paths.outputs.values_file }}"
+          git add "${FILE}"
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit — image tag already set to ${{ inputs.image_tag }}"
+            exit 0
+          fi
+
+          git commit -m "cd(${{ inputs.service_name }}): image → ${{ inputs.image_tag }}
+
+          Service     : ${{ inputs.service_name }}
+          Version     : ${{ inputs.version }}
+          Environment : ${{ inputs.environment }}
+          Helm Key    : global.${{ inputs.helm_service_key }}.imageTag
+          Triggered by: ${{ github.repository }}@${{ github.sha }}"
+
+          # Retry loop — handles concurrent pipeline pushes to gitops repo
+          for i in 1 2 3 4 5; do
+            git push && break
+            echo "Push attempt ${i}/5 failed — pulling with rebase and retrying..."
+            git pull --rebase origin main
+            sleep $((i * 2))
+          done
+
+      # ── Success email ─────────────────────────────────────
+      - name: Send Success Email
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "MediTrack CD — ${{ inputs.service_name }} deploying ${{ inputs.image_tag }} → ${{ inputs.environment }}"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: MediTrack CD Pipeline
+          body: |
+            ════════════════════════════════════════════════════════════
+            MediTrack CD — Deployment Triggered
+            ════════════════════════════════════════════════════════════
+
+            Service     : ${{ inputs.service_name }}
+            New Image   : ${{ inputs.image_tag }}
+            Environment : ${{ inputs.environment }}
+            Namespace   : meditrack-${{ inputs.environment }}
+            Helm Key    : global.${{ inputs.helm_service_key }}.imageTag
+            Values File : ${{ steps.paths.outputs.values_file }}
+
+            ArgoCD will auto-sync to cluster within 3 minutes.
+
+            meditrack-gitops: https://github.com/meditrack-project/meditrack-gitops
+            ════════════════════════════════════════════════════════════
+
+      # ── Failure email ─────────────────────────────────────
+      - name: Send Failure Email
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "MediTrack CD Failed — ${{ inputs.service_name }}"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: MediTrack CD Pipeline
+          body: |
+            CD manifest update FAILED for: ${{ inputs.service_name }}
+
+            Image Tag   : ${{ inputs.image_tag }}
+            Environment : ${{ inputs.environment }}
+            Values File : ${{ steps.paths.outputs.values_file }}
+            Author      : ${{ github.actor }}
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
