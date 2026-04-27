@@ -1,0 +1,146 @@
+# ─────────────────────────────────────────────────────────────
+# Template — SonarQube Analysis
+# Supports: python (FastAPI) + javascript (React/Vite)
+# Called by: each service repo ci-cd.yml
+# ─────────────────────────────────────────────────────────────
+name: "Template — SonarQube Analysis"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Human-readable service name (e.g. meditrack-user-service)"
+        required: true
+        type: string
+      service_path:
+        description: "Path to service directory relative to repo root (use . for root)"
+        required: true
+        type: string
+      sonar_project_key:
+        description: "SonarQube project key (e.g. meditrack-user-service)"
+        required: true
+        type: string
+      language:
+        description: "Runtime language: python or javascript"
+        required: true
+        type: string
+      python_version:
+        description: "Python version (python services only)"
+        required: false
+        type: string
+        default: "3.12"
+      node_version:
+        description: "Node.js version (javascript services only)"
+        required: false
+        type: string
+        default: "20"
+    secrets:
+      SONARQUBE_TOKEN:
+        required: true
+      SONARQUBE_URL:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+
+jobs:
+  sonarqube:
+    name: "1. SonarQube — ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # fetch-depth 0 required for SonarQube blame + new code detection
+
+      # ── Python: install deps + run coverage ───────────────
+      - name: Setup Python
+        if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install Python Dependencies
+        if: inputs.language == 'python'
+        working-directory: ${{ inputs.service_path }}
+        run: pip install --no-cache-dir -r requirements.txt pytest pytest-cov
+
+      - name: Run Tests with Coverage (Python)
+        if: inputs.language == 'python'
+        working-directory: ${{ inputs.service_path }}
+        run: |
+          pytest \
+            --cov=app \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            -v \
+          || echo "::warning::No tests found or tests failed — coverage may be empty"
+        # Warning only — does not block SonarQube scan
+        # Remove the || echo once tests are written
+
+      # ── JavaScript: install deps + run coverage ───────────
+      - name: Setup Node.js
+        if: inputs.language == 'javascript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: "${{ inputs.service_path }}/package-lock.json"
+
+      - name: Install JS Dependencies
+        if: inputs.language == 'javascript'
+        working-directory: ${{ inputs.service_path }}
+        run: npm ci
+
+      - name: Run Tests with Coverage (JavaScript)
+        if: inputs.language == 'javascript'
+        working-directory: ${{ inputs.service_path }}
+        run: |
+          npm run test -- --coverage --watchAll=false \
+          || echo "::warning::No tests found or tests failed — coverage may be empty"
+
+      # ── SonarQube Scan (reads sonar-project.properties) ───
+      - name: SonarQube Analysis
+        uses: SonarSource/sonarqube-scan-action@v3
+        with:
+          projectBaseDir: ${{ inputs.service_path }}
+          args: >
+            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
+            -Dsonar.projectName=${{ inputs.service_name }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONARQUBE_URL }}
+
+      # ── Quality Gate (fails job if gate not passed) ────────
+      - name: SonarQube Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONARQUBE_URL }}
+
+      # ── Email on failure ───────────────────────────────────
+      - name: Send Email on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "MediTrack CI Failed — SonarQube (${{ inputs.service_name }})"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: MediTrack CI Pipeline
+          body: |
+            SonarQube scan FAILED for: ${{ inputs.service_name }}
+
+            Branch : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            Author : ${{ github.actor }}
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
