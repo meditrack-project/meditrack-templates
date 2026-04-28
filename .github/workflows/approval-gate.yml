@@ -1,9 +1,4 @@
-# ─────────────────────────────────────────────────────────────
-# Template — Approval Gate (Production only)
-# Uses GitHub Environment "production" protection rules
-# Sends email with direct approve/reject link
-# Only called from main branch builds
-# ─────────────────────────────────────────────────────────────
+
 name: "Template — Approval Gate"
 
 on:
@@ -34,10 +29,7 @@ jobs:
     name: "Approval Gate — ${{ inputs.service_name }}"
     runs-on: ubuntu-latest
     environment: production
-    # ↑ This is the GitHub Environment gate
-    # Configure in: repo → Settings → Environments → production
-    # Add required reviewers there to enforce human approval
-
+    
     steps:
       - name: Send Approval Request Email
         uses: dawidd6/action-send-mail@v3
