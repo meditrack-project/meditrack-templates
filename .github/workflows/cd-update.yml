@@ -1,11 +1,3 @@
-# ─────────────────────────────────────────────────────────────
-# Template — CD ArgoCD Manifest Update
-# Checks out meditrack-gitops repo
-# Uses yq to patch global.<helm_service_key>.imageTag
-# in values-dev.yaml (dev) or values-prod.yaml (prod)
-# Retry loop on git push (handles concurrent pushes)
-# Sends success + failure emails
-# ─────────────────────────────────────────────────────────────
 name: "Template — CD GitOps Update"
 
 on:
