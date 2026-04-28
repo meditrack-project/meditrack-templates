@@ -57,35 +57,7 @@ jobs:
         with:
           fetch-depth: 0
           # fetch-depth 0 required for SonarQube blame + new code detection
-
-      # ── Python: install deps + run coverage ───────────────
-      - name: Setup Python
-        if: inputs.language == 'python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version }}
-
-      - name: Install Python Dependencies
-        if: inputs.language == 'python'
-        working-directory: ${{ inputs.service_path }}
-        run: pip install --no-cache-dir -r requirements.txt pytest pytest-cov
-
-      
-
-      # ── JavaScript: install deps + run coverage ───────────
-      - name: Setup Node.js
-        if: inputs.language == 'javascript'
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node_version }}
-
-      - name: Install JS Dependencies
-        if: inputs.language == 'javascript'
-        working-directory: ${{ inputs.service_path }}
-        run: npm install
-
-      
-
+          
       # ── SonarQube Scan (reads sonar-project.properties) ───
       - name: SonarQube Analysis
         uses: SonarSource/sonarqube-scan-action@v3
