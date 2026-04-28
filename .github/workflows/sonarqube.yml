@@ -95,7 +95,7 @@ jobs:
       - name: Install JS Dependencies
         if: inputs.language == 'javascript'
         working-directory: ${{ inputs.service_path }}
-        run: npm ci
+        run: npm install
 
       - name: Run Tests with Coverage (JavaScript)
         if: inputs.language == 'javascript'
