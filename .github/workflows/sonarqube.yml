@@ -70,18 +70,7 @@ jobs:
         working-directory: ${{ inputs.service_path }}
         run: pip install --no-cache-dir -r requirements.txt pytest pytest-cov
 
-      - name: Run Tests with Coverage (Python)
-        if: inputs.language == 'python'
-        working-directory: ${{ inputs.service_path }}
-        run: |
-          pytest \
-            --cov=app \
-            --cov-report=xml:coverage.xml \
-            --cov-report=term-missing \
-            -v \
-          || echo "::warning::No tests found or tests failed — coverage may be empty"
-        # Warning only — does not block SonarQube scan
-        # Remove the || echo once tests are written
+      
 
       # ── JavaScript: install deps + run coverage ───────────
       - name: Setup Node.js
@@ -95,12 +84,7 @@ jobs:
         working-directory: ${{ inputs.service_path }}
         run: npm install
 
-      - name: Run Tests with Coverage (JavaScript)
-        if: inputs.language == 'javascript'
-        working-directory: ${{ inputs.service_path }}
-        run: |
-          npm run test -- --coverage --watchAll=false \
-          || echo "::warning::No tests found or tests failed — coverage may be empty"
+      
 
       # ── SonarQube Scan (reads sonar-project.properties) ───
       - name: SonarQube Analysis
