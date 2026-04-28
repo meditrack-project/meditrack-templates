@@ -1,9 +1,3 @@
-# ─────────────────────────────────────────────────────────────
-# Template — Snyk SCA (Software Composition Analysis)
-# Supports: python (pip) + javascript (npm)
-# continue-on-error: true — reports vulns but never blocks
-# Uploads HTML report as artifact
-# ─────────────────────────────────────────────────────────────
 name: "Template — Snyk SCA"
 
 on:
