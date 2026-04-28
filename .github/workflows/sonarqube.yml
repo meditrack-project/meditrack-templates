@@ -89,8 +89,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
-          cache-dependency-path: "${{ inputs.service_path }}/package-lock.json"
 
       - name: Install JS Dependencies
         if: inputs.language == 'javascript'
